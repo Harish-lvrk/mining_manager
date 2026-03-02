@@ -94,6 +94,18 @@ def _mining_collections() -> list[dict]:
 # _render_create_item_section save block BEFORE this function is called.
 # This function just assembles whatever is in asset_urls into STAC format.
 
+_BAND_NAMES = {
+    1: [{"name": "Grey",  "common_name": "gray"}],
+    3: [{"name": "Blue",  "common_name": "blue"},
+        {"name": "Green", "common_name": "green"},
+        {"name": "Red",   "common_name": "red"}],
+    4: [{"name": "Blue",  "common_name": "blue"},
+        {"name": "Green", "common_name": "green"},
+        {"name": "Red",   "common_name": "red"},
+        {"name": "NIR",   "common_name": "nir"}],
+}
+
+
 def _build_mining_item(
     item_id: str,
     collection: str,
@@ -103,14 +115,16 @@ def _build_mining_item(
     bbox: list[float],
     geometry: dict,
     asset_urls: dict[str, str],
+    tif_meta: dict | None = None,
 ) -> dict:
     assets: dict = {}
+    meta = tif_meta or {}
 
     _ASSET_SCHEMA = {
         "visual":  ("image/tiff; application=geotiff; profile=cloud-optimized",
                     ["data", "visual"], "COG Image"),
         "tiles":   ("application/json",  ["tiles"],    "TiTiler RGB Tile Service"),
-        "preview": ("image/png",         ["overview"], "RGB Preview Image"),
+        "preview": ("image/png",         ["overview", "thumbnail"], "RGB Preview Image"),
     }
 
     for key, url in asset_urls.items():
@@ -133,6 +147,22 @@ def _build_mining_item(
                 "title": "Analytics Data",
             }
 
+    # ── Build properties ───────────────────────────────────────────────────────
+    band_count = meta.get("band_count")
+    eo_bands   = _BAND_NAMES.get(band_count, [{"name": f"Band{i+1}"} for i in range(band_count or 0)])
+
+    properties: dict = {
+        "datetime":             datetime_str,
+        "region_id":            region_id,
+        "mining_location_name": location_name,
+    }
+    if meta.get("gsd"):
+        properties["gsd"] = meta["gsd"]
+    if meta.get("epsg"):
+        properties["proj:epsg"] = meta["epsg"]
+    if eo_bands:
+        properties["eo:bands"] = eo_bands
+
     return {
         "type":         "Feature",
         "stac_version": "1.0.0",
@@ -150,16 +180,11 @@ def _build_mining_item(
             {"rel": "self",       "type": "application/geo+json",
              "href": f"{STAC_API_URL}/collections/{collection}/items/{item_id}"},
         ],
-        "properties": {
-            "datetime":             datetime_str,
-            "region_id":            region_id,
-            "mining_location_name": location_name,
-        },
+        "properties": properties,
         "assets": assets,
         "stac_extensions": [
             "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
             "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
-            "https://stac-extensions.github.io/view/v1.0.0/schema.json",
         ],
     }
 
@@ -676,6 +701,7 @@ def _render_create_item_section() -> None:
         bbox          = bbox,
         geometry      = geometry,
         asset_urls    = asset_urls,
+        tif_meta      = tif_meta,
     )
 
     if do_preview:
