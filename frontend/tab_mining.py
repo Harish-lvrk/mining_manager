@@ -339,83 +339,161 @@ def _render_create_item_section() -> None:
 
     st.divider()
 
-    # ── 2 · Upload GeoTIFF → auto-converted to COG ───────────────────────────
+    # ── 2 · GeoTIFF input (path or upload) ───────────────────────────────────
     st.markdown("##### 2 · Upload GeoTIFF")
-    st.caption(
-        "Upload any GeoTIFF — it will be **converted to COG** automatically. "
-        "Item ID, bounding box and geometry are extracted from the COG."
+
+    _LARGE_MB = 1024   # > 1 GB → force path mode
+
+    input_mode = st.radio(
+        "Input method",
+        ["📂 Local file path (large files / any size)",
+         "⬆️  Browser upload (< 1 GB)"],
+        horizontal=True,
+        key="mining_input_mode",
+        help="Use **Local file path** for files > 1 GB. The file is read directly from disk — no memory limit.",
     )
-    tif_file = st.file_uploader(
-        "GeoTIFF File (.tif / .tiff) *",
-        type=["tif", "tiff"],
-        key="mining_tif_upload",
-    )
+    use_path_mode = input_mode.startswith("📂")
 
     tif_meta: dict | None     = None
     item_id_auto: str         = ""
     cog_tmp_path: Path | None = None
+    raw_src_path: Path | None = None   # set only in path mode (original file location)
+    tif_file                  = None   # set only in upload mode
 
-    if tif_file is not None:
-        from backend.cog import convert_to_cog, read_metadata
-        import tempfile, shutil as _shutil
+    if use_path_mode:
+        # ── Path mode: read directly from disk, no Streamlit memory ──────────
+        st.caption(
+            "Enter the **absolute path** to the GeoTIFF on this server. "
+            "The file is read from disk — works for 2 GB+ files."
+        )
+        raw_path_str = st.text_input(
+            "Absolute file path *",
+            placeholder="/home/hareesh/Documents/survey/image.tif",
+            key="mining_path_input",
+        )
+        if not raw_path_str:
+            st.warning("⚠️ Enter the file path above to continue.")
+        else:
+            p = Path(raw_path_str.strip())
+            if not p.exists():
+                st.error(f"❌ File not found: `{p}`")
+            elif p.suffix.lower() not in {".tif", ".tiff"}:
+                st.error("❌ Must be a `.tif` or `.tiff` file.")
+            else:
+                raw_src_path = p
+                item_id_auto = p.stem
+                st.info(f"📛 Item ID will be: **`{item_id_auto}`**")
 
-        item_id_auto = Path(tif_file.name).stem
-        st.info(f"📛 Item ID will be: **`{item_id_auto}`**")
+                cache_key = f"mining_cog_path_{p}"
+                cached    = st.session_state.get(cache_key)
+                if cached and not Path(cached["cog_path"]).exists():
+                    del st.session_state[cache_key]
+                    cached = None
 
-        # Cache key based on filename — only reconvert when a NEW file is uploaded
-        cache_key = f"mining_cog_{tif_file.name}"
-        cached    = st.session_state.get(cache_key)
+                if cached is None:
+                    from backend.cog import convert_to_cog, read_metadata
+                    import tempfile
+                    try:
+                        cog_path = Path(tempfile.mkdtemp()) / (p.stem + "_cog.tif")
+                        with st.spinner("⚙️ Converting to COG… (this may take a while for large files)"):
+                            ok, err = convert_to_cog(p, cog_path)
+                        if not ok:
+                            st.error(f"❌ COG conversion failed: {err}")
+                        else:
+                            meta = read_metadata(cog_path)
+                            st.session_state[cache_key] = {"cog_path": str(cog_path), "meta": meta}
+                            cached = st.session_state[cache_key]
+                    except Exception as e:
+                        st.error(f"❌ Error processing GeoTIFF: {e}")
 
-        # Invalidate cache if the temp COG was cleaned up
-        if cached and not Path(cached["cog_path"]).exists():
-            del st.session_state[cache_key]
-            cached = None
+                if cached:
+                    tif_meta     = cached["meta"]
+                    cog_tmp_path = Path(cached["cog_path"])
+                    st.success(
+                        f"✅ COG ready — "
+                        f"**Bbox:** `{tif_meta['bbox']}`  ·  "
+                        f"**Bands:** {tif_meta['band_count']}  ·  "
+                        f"**GSD:** {tif_meta['gsd']} m  ·  "
+                        f"**EPSG:** {tif_meta['epsg']}"
+                    )
 
-        if cached is None:
-            # ── First upload: convert to COG and cache the result ──
-            try:
-                CHUNK = 64 * 1024 * 1024  # 64 MB chunks — safe for 2 GB+ files
-                tif_file.seek(0)
-                with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as raw_tmp:
-                    raw_path = Path(raw_tmp.name)
-                    pb = st.progress(0, text="📥 Streaming upload to disk…")
-                    written = 0
-                    while True:
-                        chunk = tif_file.read(CHUNK)
-                        if not chunk:
-                            break
-                        raw_tmp.write(chunk)
-                        written += len(chunk)
-                        pb.progress(
-                            min(written / (2 * 1024**3), 0.99),
-                            text=f"📥 {written / 1024**2:.0f} MB written…"
-                        )
-                    pb.empty()
+    else:
+        # ── Browser upload mode ───────────────────────────────────────────────
+        st.caption(
+            "Upload any GeoTIFF < 1 GB — it will be **converted to COG** automatically. "
+            "For larger files, switch to **Local file path** above."
+        )
+        tif_file = st.file_uploader(
+            "GeoTIFF File (.tif / .tiff) *",
+            type=["tif", "tiff"],
+            key="mining_tif_upload",
+        )
 
-                cog_path = raw_path.with_name(raw_path.stem + "_cog.tif")
-                with st.spinner("⚙️ Converting to Cloud-Optimized GeoTIFF (COG)…"):
-                    ok, err = convert_to_cog(raw_path, cog_path)
-                raw_path.unlink(missing_ok=True)
+        if tif_file is not None:
+            file_size_mb = tif_file.size / 1_000_000
+            if file_size_mb > _LARGE_MB:
+                st.error(
+                    f"❌ File is **{file_size_mb:.0f} MB** — too large for browser upload.  \n"
+                    "Switch to **📂 Local file path** mode above."
+                )
+                tif_file = None   # prevent further processing
+            else:
+                from backend.cog import convert_to_cog, read_metadata
+                import tempfile, shutil as _shutil
 
-                if not ok:
-                    st.error(f"❌ COG conversion failed: {err}")
-                else:
-                    meta = read_metadata(cog_path)
-                    st.session_state[cache_key] = {"cog_path": str(cog_path), "meta": meta}
-                    cached = st.session_state[cache_key]
-            except Exception as e:
-                st.error(f"❌ Error processing GeoTIFF: {e}")
+                item_id_auto = Path(tif_file.name).stem
+                st.info(f"📛 Item ID will be: **`{item_id_auto}`**")
 
-        if cached:
-            tif_meta     = cached["meta"]
-            cog_tmp_path = Path(cached["cog_path"])
-            st.success(
-                f"✅ COG ready — "
-                f"**Bbox:** `{tif_meta['bbox']}`  ·  "
-                f"**Bands:** {tif_meta['band_count']}  ·  "
-                f"**GSD:** {tif_meta['gsd']} m  ·  "
-                f"**EPSG:** {tif_meta['epsg']}"
-            )
+                cache_key = f"mining_cog_{tif_file.name}"
+                cached    = st.session_state.get(cache_key)
+                if cached and not Path(cached["cog_path"]).exists():
+                    del st.session_state[cache_key]
+                    cached = None
+
+                if cached is None:
+                    try:
+                        CHUNK = 64 * 1024 * 1024
+                        tif_file.seek(0)
+                        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as raw_tmp:
+                            raw_path = Path(raw_tmp.name)
+                            pb = st.progress(0, text="📥 Streaming upload to disk…")
+                            written = 0
+                            while True:
+                                chunk = tif_file.read(CHUNK)
+                                if not chunk:
+                                    break
+                                raw_tmp.write(chunk)
+                                written += len(chunk)
+                                pb.progress(
+                                    min(written / (1024**3), 0.99),
+                                    text=f"📥 {written / 1024**2:.0f} MB written…"
+                                )
+                            pb.empty()
+
+                        cog_path = raw_path.with_name(raw_path.stem + "_cog.tif")
+                        with st.spinner("⚙️ Converting to COG…"):
+                            ok, err = convert_to_cog(raw_path, cog_path)
+                        raw_path.unlink(missing_ok=True)
+
+                        if not ok:
+                            st.error(f"❌ COG conversion failed: {err}")
+                        else:
+                            meta = read_metadata(cog_path)
+                            st.session_state[cache_key] = {"cog_path": str(cog_path), "meta": meta}
+                            cached = st.session_state[cache_key]
+                    except Exception as e:
+                        st.error(f"❌ Error processing GeoTIFF: {e}")
+
+                if cached:
+                    tif_meta     = cached["meta"]
+                    cog_tmp_path = Path(cached["cog_path"])
+                    st.success(
+                        f"✅ COG ready — "
+                        f"**Bbox:** `{tif_meta['bbox']}`  ·  "
+                        f"**Bands:** {tif_meta['band_count']}  ·  "
+                        f"**GSD:** {tif_meta['gsd']} m  ·  "
+                        f"**EPSG:** {tif_meta['epsg']}"
+                    )
 
     st.divider()
 
@@ -466,9 +544,9 @@ def _render_create_item_section() -> None:
 
     # ── Validation ────────────────────────────────────────────────────────────
     errors: list[str] = []
-    if tif_file is None:
-        errors.append("GeoTIFF file is required.")
-    if tif_meta is None and tif_file is not None:
+    if tif_file is None and raw_src_path is None:
+        errors.append("GeoTIFF is required (file path or upload).")
+    if tif_meta is None and (tif_file is not None or raw_src_path is not None):
         errors.append("GeoTIFF could not be read — check the file and try again.")
     for akey, text in geojson_texts.items():
         valid, msg = _validate_geojson_text(akey, text)
@@ -523,23 +601,29 @@ def _render_create_item_section() -> None:
     if do_save:
         import shutil, requests as _req
 
-        # ── 1. Save original TIF (chunked — safe for 2 GB+ files) ─────────────
-        tif_file.seek(0)
-        CHUNK = 64 * 1024 * 1024   # 64 MB
-        pb_orig = st.progress(0, text="💾 Saving original TIF…")
-        written = 0
-        with open(orig_dest, "wb") as fout:
-            while True:
-                chunk = tif_file.read(CHUNK)
-                if not chunk:
-                    break
-                fout.write(chunk)
-                written += len(chunk)
-                pb_orig.progress(
-                    min(written / (2 * 1024**3), 0.99),
-                    text=f"💾 Original TIF: {written / 1024**2:.0f} MB saved…"
-                )
-        pb_orig.empty()
+        # ── 1. Save original TIF ─────────────────────────────────────────────
+        if raw_src_path:
+            # Path mode: copy directly from source (disk-to-disk, no RAM)
+            with st.spinner(f"💾 Copying original TIF from `{raw_src_path.name}`…"):
+                shutil.copy2(raw_src_path, orig_dest)
+        else:
+            # Upload mode: stream in 64 MB chunks
+            tif_file.seek(0)
+            CHUNK = 64 * 1024 * 1024
+            pb_orig = st.progress(0, text="💾 Saving original TIF…")
+            written = 0
+            with open(orig_dest, "wb") as fout:
+                while True:
+                    chunk = tif_file.read(CHUNK)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+                    written += len(chunk)
+                    pb_orig.progress(
+                        min(written / (1024**3), 0.99),
+                        text=f"💾 Original TIF: {written / 1024**2:.0f} MB saved…"
+                    )
+            pb_orig.empty()
 
         # ── 2. Save COG TIF ──────────────────────────────────────────────────
         if cog_tmp_path and cog_tmp_path.exists():
