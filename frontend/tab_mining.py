@@ -374,10 +374,23 @@ def _render_create_item_section() -> None:
         if cached is None:
             # ── First upload: convert to COG and cache the result ──
             try:
-                tif_file.seek(0)          # ensure stream is at start
+                CHUNK = 64 * 1024 * 1024  # 64 MB chunks — safe for 2 GB+ files
+                tif_file.seek(0)
                 with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as raw_tmp:
-                    _shutil.copyfileobj(tif_file, raw_tmp)
                     raw_path = Path(raw_tmp.name)
+                    pb = st.progress(0, text="📥 Streaming upload to disk…")
+                    written = 0
+                    while True:
+                        chunk = tif_file.read(CHUNK)
+                        if not chunk:
+                            break
+                        raw_tmp.write(chunk)
+                        written += len(chunk)
+                        pb.progress(
+                            min(written / (2 * 1024**3), 0.99),
+                            text=f"📥 {written / 1024**2:.0f} MB written…"
+                        )
+                    pb.empty()
 
                 cog_path = raw_path.with_name(raw_path.stem + "_cog.tif")
                 with st.spinner("⚙️ Converting to Cloud-Optimized GeoTIFF (COG)…"):
@@ -510,9 +523,23 @@ def _render_create_item_section() -> None:
     if do_save:
         import shutil, requests as _req
 
-        # ── 1. Save original TIF ─────────────────────────────────────────────
+        # ── 1. Save original TIF (chunked — safe for 2 GB+ files) ─────────────
         tif_file.seek(0)
-        orig_dest.write_bytes(tif_file.read())
+        CHUNK = 64 * 1024 * 1024   # 64 MB
+        pb_orig = st.progress(0, text="💾 Saving original TIF…")
+        written = 0
+        with open(orig_dest, "wb") as fout:
+            while True:
+                chunk = tif_file.read(CHUNK)
+                if not chunk:
+                    break
+                fout.write(chunk)
+                written += len(chunk)
+                pb_orig.progress(
+                    min(written / (2 * 1024**3), 0.99),
+                    text=f"💾 Original TIF: {written / 1024**2:.0f} MB saved…"
+                )
+        pb_orig.empty()
 
         # ── 2. Save COG TIF ──────────────────────────────────────────────────
         if cog_tmp_path and cog_tmp_path.exists():
