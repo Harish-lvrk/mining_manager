@@ -18,7 +18,7 @@ STAC_API_URL     = f"http://{LAN_IP}:8082"
 
 # Internal URL used by this app to POST/PUT/DELETE to the STAC API
 # (the app runs locally, so localhost is fine for actual HTTP calls)
-STAC_API_INTERNAL = "http://localhost:8082"
+STAC_API_INTERNAL = f"http://{LAN_IP}:8082"
 
 # ── Local paths ───────────────────────────────────────────────────────────────
 FILE_SERVER_ROOT = Path.home()
